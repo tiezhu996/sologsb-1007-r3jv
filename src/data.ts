@@ -70,6 +70,13 @@ export const createSeedProject = (): ProjectData => {
       { id: "sp-chen", name: "陈师傅", role: "旁述人", color: "#0f766e" },
     ],
     tags,
+    glossary: [
+      { id: "gloss-lin-youde", from: "林友德", to: "林有德" },
+      { id: "gloss-huiyan", from: "汇演", to: "会演" },
+      { id: "gloss-wenyi-huiyan", from: "文艺汇演", to: "文艺会演" },
+      { id: "gloss-dida", from: "滴嗒", to: "滴答" },
+      { id: "gloss-yongju", from: "雨剧", to: "甬剧" },
+    ],
     tracks: [
       {
         id: "track-zh",
@@ -103,7 +110,7 @@ export const createSeedProject = (): ProjectData => {
             33.8,
             49.6,
             "sp-lin",
-            "我爸爸叫林有德，他原来在宁绍帮的船上做账房，后来日本飞机来了，全家坐小船往闽江上游走。",
+            "我爸爸叫林友德，他原来在宁绍帮的船上做账房，后来日本飞机来了，全家坐小船往闽江上游走。",
             2,
             { lowConfidence: true, properNoun: true },
             [byLabel("家族迁徙"), byLabel("1938 年逃难"), byLabel("林有德")],
@@ -134,7 +141,7 @@ export const createSeedProject = (): ProjectData => {
             86.0,
             106.5,
             "sp-lin",
-            "1949 年以后我们又回来，父亲不再跑船，在小学旁边修钟表。钟摆滴答滴答，比潮水准。",
+            "1949 年以后我们又回来，父亲不再跑船，在小学旁边修钟表。钟摆滴嗒滴嗒，比潮水准。夜里静下来，还听得见隔壁那台老钟滴嗒响。",
             4,
             { dialect: true },
             [byLabel("家族迁徙"), byLabel("1949 年返乡")],
@@ -154,7 +161,7 @@ export const createSeedProject = (): ProjectData => {
             128.6,
             148.2,
             "sp-lin",
-            "对，1956 年码头办文艺汇演，我穿蓝布衫上台唱《打猪草》。台下好多人，我紧张得忘了一句。",
+            "对，1956 年码头办文艺汇演，我穿蓝布衫上台唱《打猪草》。台下好多人，汇演那天我紧张得忘了一句。",
             4,
             { dialect: true },
             [byLabel("民间戏曲"), byLabel("1956 年文艺汇演")],
@@ -171,7 +178,7 @@ export const createSeedProject = (): ProjectData => {
             dialect: true,
             lowConfidence: true,
           }, [byLabel("码头生活")]),
-          segment("fy-2", 66.7, 84.1, "sp-lin", "是啦。船帮人讲的话我半听半猜，只记着伊侬唱调，后尾才知叫“甬剧”。", 3, {
+          segment("fy-2", 66.7, 84.1, "sp-lin", "是啦。船帮人讲的话我半听半猜，只记着伊侬唱调，后尾才知叫“雨剧”。", 3, {
             dialect: true,
             properNoun: true,
           }, [byLabel("民间戏曲"), byLabel("码头生活")]),

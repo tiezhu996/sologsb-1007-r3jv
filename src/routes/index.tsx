@@ -13,8 +13,22 @@ import {
   untrack,
 } from "solid-js";
 import { createSeedProject, uid } from "../data";
+import {
+  applyEntryToText,
+  chainBlockingEntry,
+  findChains,
+  scanMatches,
+  validateEntryDraft,
+} from "../glossary";
 import { downloadText, formatTime, loadProject, parseTime, saveProject } from "../persistence";
-import type { Confidence, PersistedEnvelope, ProjectData, Segment, TranscriptTrack } from "../types";
+import type {
+  Confidence,
+  GlossaryEntry,
+  PersistedEnvelope,
+  ProjectData,
+  Segment,
+  TranscriptTrack,
+} from "../types";
 
 const CHANNEL_NAME = "sologsb-1007-editor";
 const TAB_ID = uid("tab");
@@ -115,6 +129,10 @@ export default function OralHistoryEditor() {
   const [commentDraft, setCommentDraft] = createSignal("");
   const [replyDrafts, setReplyDrafts] = createSignal<Record<string, string>>({});
   const [trackFilter, setTrackFilter] = createSignal<"all" | "unreviewed" | "low">("all");
+  const [glossaryOpen, setGlossaryOpen] = createSignal(false);
+  const [entryFrom, setEntryFrom] = createSignal("");
+  const [entryTo, setEntryTo] = createSignal("");
+  const [glossaryNotice, setGlossaryNotice] = createSignal<{ kind: "info" | "warn" | "error"; text: string } | null>(null);
   let editorRef: HTMLTextAreaElement | undefined;
   let fileInputRef: HTMLInputElement | undefined;
   let saveTimer: number | undefined;
@@ -141,6 +159,47 @@ export default function OralHistoryEditor() {
   const speakerById = (speakerId: string) =>
     project().speakers.find((speaker) => speaker.id === speakerId) ?? project().speakers[0];
   const tagById = (tagId: string) => project().tags.find((tag) => tag.id === tagId);
+
+  // 词条校对：错写法越长优先级越高，与扫描时的最长匹配保持一致。
+  const glossaryEntries = createMemo(() =>
+    [...project().glossary].sort((a, b) => b.from.length - a.from.length || a.id.localeCompare(b.id)),
+  );
+  // 「规范写法又是另一条错写法」的词条对，登记后即时说明是哪两条。
+  const glossaryChains = createMemo(() => findChains(project().glossary));
+  interface SegmentHit {
+    segment: Segment;
+    total: number;
+    perEntry: Map<string, number>;
+  }
+  // 打开面板时，只列出当前轨道里还能命中词条的片段。
+  const trackHits = createMemo<SegmentHit[]>(() => {
+    const entries = project().glossary;
+    const hits: SegmentHit[] = [];
+    for (const segment of activeTrack()?.segments ?? []) {
+      // 计数与应用共用同一次最长优先扫描：套在更长词条内部的短词条不重复计数。
+      const matches = scanMatches(segment.text, entries);
+      if (!matches.length) continue;
+      const perEntry = new Map<string, number>();
+      for (const match of matches) perEntry.set(match.entryId, (perEntry.get(match.entryId) ?? 0) + 1);
+      hits.push({ segment, total: matches.length, perEntry });
+    }
+    return hits;
+  });
+  const entryHitTotal = (entryId: string) =>
+    trackHits().reduce((sum, hit) => sum + (hit.perEntry.get(entryId) ?? 0), 0);
+  const entryById = (entryId: string) => project().glossary.find((entry) => entry.id === entryId);
+  const highlightParts = (text: string) => {
+    const matches = scanMatches(text, project().glossary);
+    const parts: { text: string; hit?: GlossaryEntry }[] = [];
+    let cursor = 0;
+    for (const match of matches) {
+      if (match.start > cursor) parts.push({ text: text.slice(cursor, match.start) });
+      parts.push({ text: text.slice(match.start, match.end), hit: entryById(match.entryId) });
+      cursor = match.end;
+    }
+    if (cursor < text.length) parts.push({ text: text.slice(cursor) });
+    return parts;
+  };
 
   const commit = (label: string, mutate: (draft: ProjectData) => void) => {
     const current = structuredClone(project());
@@ -318,6 +377,60 @@ export default function OralHistoryEditor() {
         ? segment.tagIds.filter((id) => id !== tagId)
         : [...segment.tagIds, tagId];
       segment.reviewed = false;
+    });
+  };
+
+  const addGlossaryEntry = () => {
+    const issue = validateEntryDraft(entryFrom(), entryTo(), project().glossary);
+    if (issue) {
+      setGlossaryNotice({ kind: "error", text: issue.message });
+      return;
+    }
+    const entry: GlossaryEntry = { id: uid("gloss"), from: entryFrom().trim(), to: entryTo().trim() };
+    commit("登记词条", (draft) => {
+      draft.glossary.push(entry);
+    });
+    setEntryFrom("");
+    setEntryTo("");
+    setGlossaryNotice({ kind: "info", text: `已登记词条「${entry.from} → ${entry.to}」，随草稿保存在本机。` });
+  };
+
+  const removeGlossaryEntry = (entry: GlossaryEntry) => {
+    commit("删除词条", (draft) => {
+      draft.glossary = draft.glossary.filter((item) => item.id !== entry.id);
+    });
+    setGlossaryNotice({ kind: "info", text: `已删除词条「${entry.from} → ${entry.to}」。` });
+  };
+
+  const applyGlossaryEntry = (segmentId: string, entry: GlossaryEntry) => {
+    // 规范写法又是另一条错写法时停下：改完会立刻被另一条命中，改写链有歧义，需人工裁决。
+    const chained = chainBlockingEntry(entry, project().glossary);
+    if (chained) {
+      setGlossaryNotice({
+        kind: "error",
+        text: `已停下：词条「${entry.from} → ${entry.to}」的规范写法「${entry.to}」恰好是另一条词条「${chained.from} → ${chained.to}」的错写法。请先修改或删除其中一条，再应用。`,
+      });
+      return;
+    }
+    const target = activeTrack()?.segments.find((item) => item.id === segmentId);
+    if (!target) return;
+    const count = scanMatches(target.text, project().glossary).filter((match) => match.entryId === entry.id).length;
+    if (!count) {
+      setGlossaryNotice({ kind: "warn", text: `当前片段已没有「${entry.from}」的独立命中（可能套在更长的词条里，或刚被改过）。` });
+      return;
+    }
+    commit("应用词条校对", (draft) => {
+      const track = draft.tracks.find((item) => item.id === draft.activeTrackId);
+      const current = track?.segments.find((item) => item.id === segmentId);
+      if (!current) return;
+      current.text = applyEntryToText(current.text, entry, draft.glossary);
+      // 文本被改写后退回未校对，重新人工确认。
+      current.reviewed = false;
+    });
+    setSelectedId(segmentId);
+    setGlossaryNotice({
+      kind: "info",
+      text: `已将本片段中「${entry.from}」的 ${count} 处全部改为「${entry.to}」，该片段已退回未校对。`,
     });
   };
 
@@ -555,6 +668,9 @@ export default function OralHistoryEditor() {
               <button class={trackFilter() === "all" ? "active" : ""} onClick={() => setTrackFilter("all")}>全部</button>
               <button class={trackFilter() === "unreviewed" ? "active" : ""} onClick={() => setTrackFilter("unreviewed")}>未校对</button>
               <button class={trackFilter() === "low" ? "active" : ""} onClick={() => setTrackFilter("low")}>低置信</button>
+              <button class="glossary-trigger" onClick={() => { setGlossaryNotice(null); setGlossaryOpen(true); }}>
+                词条校对<span>{trackHits().length}</span>
+              </button>
             </div>
           </div>
 
@@ -743,6 +859,119 @@ export default function OralHistoryEditor() {
               <span><kbd>?</kbd> 显示本帮助</span>
             </div>
             <div class="dialog-footer"><button class="btn btn-primary" onClick={() => setHelpOpen(false)}>开始校对</button></div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog>
+
+      <Dialog open={glossaryOpen()} onOpenChange={setGlossaryOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay class="dialog-overlay" />
+          <Dialog.Content class="dialog-content glossary-dialog">
+            <Dialog.Title>词条校对</Dialog.Title>
+            <Dialog.Description>
+              把同一专名的错写法和规范写法登记成一对；下方只列出「{activeTrack().name}」中仍能命中的片段。
+            </Dialog.Description>
+
+            <div class="glossary-add">
+              <input
+                aria-label="错写法"
+                placeholder="错写法，如：林友德"
+                value={entryFrom()}
+                onInput={(event) => setEntryFrom(event.currentTarget.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") addGlossaryEntry(); }}
+              />
+              <span class="glossary-arrow" aria-hidden="true">→</span>
+              <input
+                aria-label="规范写法"
+                placeholder="规范写法，如：林有德"
+                value={entryTo()}
+                onInput={(event) => setEntryTo(event.currentTarget.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") addGlossaryEntry(); }}
+              />
+              <button class="btn btn-primary" onClick={addGlossaryEntry}>登记</button>
+            </div>
+
+            <Show when={glossaryNotice()}>
+              {(notice) => <div class={`glossary-notice ${notice().kind}`} role="status">{notice().text}</div>}
+            </Show>
+
+            <For each={glossaryChains()}>
+              {(chain) => (
+                <div class="glossary-notice warn" role="alert">
+                  词条链式提醒：「{chain.first.from} → {chain.first.to}」的规范写法「{chain.first.to}」又是另一条词条「{chain.next.from} → {chain.next.to}」的错写法；对前者应用时会停下，请人工裁决这两条。
+                </div>
+              )}
+            </For>
+
+            <div class="glossary-entry-list">
+              <div class="glossary-subhead">已登记词条 <span>{project().glossary.length}</span></div>
+              <Show when={project().glossary.length} fallback={<div class="glossary-empty">还没有词条，先在上方登记第一对写法。</div>}>
+                <For each={glossaryEntries()}>
+                  {(entry) => (
+                    <div class="glossary-entry">
+                      <span class="glossary-pair">
+                        <b>{entry.from}</b>
+                        <i>→</i>
+                        <b>{entry.to}</b>
+                      </span>
+                      <span class="glossary-entry-count">本轨道 {entryHitTotal(entry.id)} 处</span>
+                      <button class="glossary-remove" title="删除词条" onClick={() => removeGlossaryEntry(entry)}>✕</button>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+
+            <div class="glossary-hits">
+              <div class="glossary-subhead">当前轨道命中片段 <span>{trackHits().length}</span></div>
+              <Show when={trackHits().length} fallback={<div class="glossary-empty">当前轨道没有能命中的片段。</div>}>
+                <For each={trackHits()}>
+                  {(hit) => {
+                    const index = () => activeTrack().segments.findIndex((item) => item.id === hit.segment.id) + 1;
+                    return (
+                      <article class={`glossary-hit ${hit.segment.reviewed ? "reviewed" : ""}`}>
+                        <header>
+                          <button class="glossary-hit-jump" onClick={() => { setSelectedId(hit.segment.id); setGlossaryOpen(false); }}>
+                            第 {index()} 段 · 命中 {hit.total} 处
+                          </button>
+                          <Show when={hit.segment.reviewed}><span class="pill done">原为已校对</span></Show>
+                        </header>
+                        <p>
+                          <For each={highlightParts(hit.segment.text)}>
+                            {(part) => (
+                              <Show when={part.hit} fallback={<span>{part.text}</span>}>
+                                {(entry) => <mark class="glossary-mark">{part.text}<small>{entry().to}</small></mark>}
+                              </Show>
+                            )}
+                          </For>
+                        </p>
+                        <div class="glossary-apply-row">
+                          <For each={[...hit.perEntry.keys()].map(entryById).filter(Boolean) as GlossaryEntry[]}>
+                            {(entry) => {
+                              const chained = () => chainBlockingEntry(entry, project().glossary);
+                              return (
+                                <button
+                                  class="glossary-apply"
+                                  disabled={!!chained()}
+                                  title={chained() ? `规范写法「${entry.to}」是另一条词条的错写法，已拦下` : `把本段所有「${entry.from}」改为「${entry.to}」`}
+                                  onClick={() => applyGlossaryEntry(hit.segment.id, entry)}
+                                >
+                                  应用「{entry.from} → {entry.to}」×{hit.perEntry.get(entry.id)}
+                                </button>
+                              );
+                            }}
+                          </For>
+                        </div>
+                      </article>
+                    );
+                  }}
+                </For>
+              </Show>
+            </div>
+
+            <div class="dialog-footer">
+              <button class="btn btn-quiet" onClick={() => setGlossaryOpen(false)}>完成</button>
+            </div>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog>

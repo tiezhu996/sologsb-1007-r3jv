@@ -4,6 +4,15 @@ import type { PersistedEnvelope, ProjectData } from "./types";
 export const STORAGE_KEY = "sologsb-1007-project-v1";
 export const SESSION_KEY = "sologsb-1007-session";
 
+/**
+ * 旧版本草稿没有词条表（glossary）字段；补上空数组即可照常打开。
+ * schema 仍为 1，老版本读到带 glossary 的新草稿时也只会忽略多余字段。
+ */
+function migrateProject(project: ProjectData): ProjectData {
+  if (!Array.isArray(project.glossary)) project.glossary = [];
+  return project;
+}
+
 export function loadProject(): { project: ProjectData; revision: number } {
   if (typeof localStorage === "undefined") {
     return { project: createSeedProject(), revision: 0 };
@@ -11,8 +20,8 @@ export function loadProject(): { project: ProjectData; revision: number } {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
     if (parsed?.schema === 1 && parsed.project?.tracks?.length) {
-      return { project: parsed.project, revision: parsed.revision ?? 0 };
-    }
+      return { project: migrateProject(parsed.project), revision: parsed.revision ?? 0 };
+    };
   } catch {
     // A malformed local draft falls back to the bundled sample.
   }
@@ -25,7 +34,7 @@ export function saveProject(project: ProjectData, revision: number, tabId: strin
     revision,
     tabId,
     savedAt: Date.now(),
-    project,
+    project: migrateProject(project),
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
   return envelope;
@@ -33,7 +42,9 @@ export function saveProject(project: ProjectData, revision: number, tabId: strin
 
 export function readEnvelope(): PersistedEnvelope | null {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
+    const envelope = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
+    if (envelope?.project) migrateProject(envelope.project);
+    return envelope;
   } catch {
     return null;
   }

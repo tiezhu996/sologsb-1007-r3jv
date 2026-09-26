@@ -55,6 +55,14 @@ export interface TranscriptTrack {
   segments: Segment[];
 }
 
+export interface GlossaryEntry {
+  id: string;
+  /** 错写法（待校对替换掉的写法） */
+  from: string;
+  /** 规范写法 */
+  to: string;
+}
+
 export interface ProjectData {
   id: string;
   title: string;
@@ -64,6 +72,8 @@ export interface ProjectData {
   speakers: Speaker[];
   tags: Tag[];
   tracks: TranscriptTrack[];
+  /** 词条校对登记表：错写法 → 规范写法，随草稿保存在本机 */
+  glossary: GlossaryEntry[];
   updatedAt: string;
 }
 
