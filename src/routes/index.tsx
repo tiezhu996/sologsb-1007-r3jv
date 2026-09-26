@@ -13,8 +13,9 @@ import {
   untrack,
 } from "solid-js";
 import { createSeedProject, uid } from "../data";
-import { downloadText, formatTime, loadProject, parseTime, saveProject } from "../persistence";
-import type { Confidence, PersistedEnvelope, ProjectData, Segment, TranscriptTrack } from "../types";
+import { downloadText, formatTime, loadProject, normalizeProject, parseTime, saveProject } from "../persistence";
+import { applyTermPair, findChainConflict, findTermHits } from "../terms";
+import type { Confidence, PersistedEnvelope, ProjectData, Segment, TermPair, TranscriptTrack } from "../types";
 
 const CHANNEL_NAME = "sologsb-1007-editor";
 const TAB_ID = uid("tab");
@@ -115,6 +116,11 @@ export default function OralHistoryEditor() {
   const [commentDraft, setCommentDraft] = createSignal("");
   const [replyDrafts, setReplyDrafts] = createSignal<Record<string, string>>({});
   const [trackFilter, setTrackFilter] = createSignal<"all" | "unreviewed" | "low">("all");
+  const [termDialogOpen, setTermDialogOpen] = createSignal(false);
+  const [wrongDraft, setWrongDraft] = createSignal("");
+  const [standardDraft, setStandardDraft] = createSignal("");
+  const [termError, setTermError] = createSignal("");
+  const [selectedHitKey, setSelectedHitKey] = createSignal("");
   let editorRef: HTMLTextAreaElement | undefined;
   let fileInputRef: HTMLInputElement | undefined;
   let saveTimer: number | undefined;
@@ -141,6 +147,99 @@ export default function OralHistoryEditor() {
   const speakerById = (speakerId: string) =>
     project().speakers.find((speaker) => speaker.id === speakerId) ?? project().speakers[0];
   const tagById = (tagId: string) => project().tags.find((tag) => tag.id === tagId);
+
+  interface TermHitRow {
+    key: string;
+    segment: Segment;
+    pair: TermPair;
+    count: number;
+    segmentIndex: number;
+  }
+
+  // 当前轨道里仍能命中错写法的片段，按片段顺序、词条登记顺序排列。
+  const termHitRows = createMemo<TermHitRow[]>(() => {
+    const pairs = project().termPairs;
+    const track = activeTrack();
+    if (!pairs.length || !track) return [];
+    const rows: TermHitRow[] = [];
+    track.segments.forEach((segment, segmentIndex) => {
+      const counts = new Map<string, number>();
+      for (const hit of findTermHits(segment.text, pairs)) {
+        counts.set(hit.pairId, (counts.get(hit.pairId) ?? 0) + 1);
+      }
+      for (const pair of pairs) {
+        const count = counts.get(pair.id);
+        if (count) rows.push({ key: `${segment.id}::${pair.id}`, segment, pair, count, segmentIndex });
+      }
+    });
+    return rows;
+  });
+
+  const chainConflict = createMemo(() => findChainConflict(project().termPairs));
+
+  const chainMessage = (source: TermPair, target: TermPair) =>
+    `已停下：「${source.wrong} → ${source.standard}」的规范写法「${source.standard}」又是「${target.wrong} → ${target.standard}」的错写法，请先调整其中一条。`;
+
+  const openTermDialog = () => {
+    setTermError("");
+    setSelectedHitKey("");
+    setTermDialogOpen(true);
+  };
+
+  const addTermPair = () => {
+    const wrong = wrongDraft().trim();
+    const standard = standardDraft().trim();
+    if (!wrong || !standard) { setTermError("请同时填写错写法和规范写法。"); return; }
+    if (wrong === standard) { setTermError("错写法与规范写法相同，无需登记。"); return; }
+    const pairs = project().termPairs;
+    if (pairs.some((pair) => pair.wrong === wrong)) { setTermError(`错写法「${wrong}」已经登记过了。`); return; }
+    const candidate: TermPair = { id: uid("term"), wrong, standard, createdAt: new Date().toISOString() };
+    const conflict = findChainConflict([...pairs, candidate]);
+    if (conflict) { setTermError(chainMessage(conflict.source, conflict.target)); return; }
+    commit("登记词条", (draft) => { draft.termPairs.push(candidate); });
+    setWrongDraft("");
+    setStandardDraft("");
+    setTermError("");
+  };
+
+  const removeTermPair = (pairId: string) => {
+    commit("删除词条", (draft) => {
+      draft.termPairs = draft.termPairs.filter((pair) => pair.id !== pairId);
+    });
+    if (selectedHitKey().endsWith(`::${pairId}`)) setSelectedHitKey("");
+  };
+
+  const applySelectedHit = () => {
+    const hit = termHitRows().find((row) => row.key === selectedHitKey());
+    if (!hit) return;
+    const chained = project().termPairs.find((pair) => pair.id !== hit.pair.id && pair.wrong === hit.pair.standard);
+    if (chained) { setTermError(chainMessage(hit.pair, chained)); return; }
+    commit(`词条校对：${hit.pair.wrong} → ${hit.pair.standard}`, (draft) => {
+      const track = draft.tracks.find((item) => item.id === draft.activeTrackId);
+      const segment = track?.segments.find((item) => item.id === hit.segment.id);
+      if (!segment) return;
+      const result = applyTermPair(segment.text, draft.termPairs, hit.pair.id);
+      if (!result.count) return;
+      segment.text = result.text;
+      segment.reviewed = false;
+    });
+    setSelectedHitKey("");
+    setTermError("");
+  };
+
+  // 把片段文本按命中区间切开，错写法高亮显示。
+  const hitTextParts = (segment: Segment, pair: TermPair) => {
+    const hits = findTermHits(segment.text, project().termPairs).filter((hit) => hit.pairId === pair.id);
+    const parts: { text: string; hit: boolean }[] = [];
+    let cursor = 0;
+    for (const hit of hits) {
+      if (hit.index > cursor) parts.push({ text: segment.text.slice(cursor, hit.index), hit: false });
+      parts.push({ text: segment.text.slice(hit.index, hit.index + pair.wrong.length), hit: true });
+      cursor = hit.index + pair.wrong.length;
+    }
+    if (cursor < segment.text.length) parts.push({ text: segment.text.slice(cursor), hit: false });
+    return parts;
+  };
 
   const commit = (label: string, mutate: (draft: ProjectData) => void) => {
     const current = structuredClone(project());
@@ -348,7 +447,7 @@ export default function OralHistoryEditor() {
     if (!incoming) return;
     if (useIncoming) {
       setPast((items) => [...items.slice(-49), structuredClone(project())]);
-      setProject(structuredClone(incoming.project));
+      setProject(normalizeProject(structuredClone(incoming.project)));
       setRevision(incoming.revision + 1);
       setSelectedId(incoming.project.tracks.find((track) => track.id === incoming.project.activeTrackId)?.segments[0]?.id ?? "");
       setLastAction("已采用其他标签页的版本");
@@ -551,10 +650,16 @@ export default function OralHistoryEditor() {
               <div class="eyebrow">当前轨道</div>
               <h1>{activeTrack().name}</h1>
             </div>
-            <div class="filters" role="group" aria-label="片段筛选">
-              <button class={trackFilter() === "all" ? "active" : ""} onClick={() => setTrackFilter("all")}>全部</button>
-              <button class={trackFilter() === "unreviewed" ? "active" : ""} onClick={() => setTrackFilter("unreviewed")}>未校对</button>
-              <button class={trackFilter() === "low" ? "active" : ""} onClick={() => setTrackFilter("low")}>低置信</button>
+            <div class="toolbar-actions">
+              <button class="btn btn-quiet terms-button" onClick={openTermDialog}>
+                词条校对
+                <Show when={termHitRows().length > 0}><span class="terms-badge">{termHitRows().length}</span></Show>
+              </button>
+              <div class="filters" role="group" aria-label="片段筛选">
+                <button class={trackFilter() === "all" ? "active" : ""} onClick={() => setTrackFilter("all")}>全部</button>
+                <button class={trackFilter() === "unreviewed" ? "active" : ""} onClick={() => setTrackFilter("unreviewed")}>未校对</button>
+                <button class={trackFilter() === "low" ? "active" : ""} onClick={() => setTrackFilter("low")}>低置信</button>
+              </div>
             </div>
           </div>
 
@@ -725,6 +830,85 @@ export default function OralHistoryEditor() {
         <span>版本 {revision() + 1} · 本地草稿</span>
         <span class="status-shortcuts">J/K 浏览　R 已校对　M 合并　? 帮助</span>
       </footer>
+
+      <Dialog open={termDialogOpen()} onOpenChange={setTermDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay class="dialog-overlay" />
+          <Dialog.Content class="dialog-content terms-dialog">
+            <Dialog.Title>词条校对</Dialog.Title>
+            <Dialog.Description>
+              把同一专名的错写法和规范写法登记成一对；下方列出当前轨道还能命中的片段，选中一条应用后，这段里该词全部写成规范写法，并退回未校对。
+            </Dialog.Description>
+
+            <div class="term-form">
+              <input
+                aria-label="错写法"
+                placeholder="错写法，如：宁邵帮"
+                value={wrongDraft()}
+                onInput={(event) => setWrongDraft(event.currentTarget.value)}
+              />
+              <span class="term-arrow" aria-hidden="true">→</span>
+              <input
+                aria-label="规范写法"
+                placeholder="规范写法，如：宁绍帮"
+                value={standardDraft()}
+                onInput={(event) => setStandardDraft(event.currentTarget.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") addTermPair(); }}
+              />
+              <button class="btn btn-primary" onClick={addTermPair}>登记</button>
+            </div>
+            <Show when={termError()}><div class="term-error" role="alert">{termError()}</div></Show>
+            <Show when={!termError() && chainConflict()}>
+              {(conflict) => <div class="term-error" role="alert">{chainMessage(conflict().source, conflict().target)}</div>}
+            </Show>
+
+            <div class="term-pair-list">
+              <For each={project().termPairs} fallback={<div class="mini-empty">还没有登记词条，先在上方登记一对。</div>}>
+                {(pair) => (
+                  <div class="term-pair-row">
+                    <span class="term-wrong">{pair.wrong}</span>
+                    <span class="term-arrow" aria-hidden="true">→</span>
+                    <span class="term-standard">{pair.standard}</span>
+                    <button class="term-remove" title="删除词条" onClick={() => removeTermPair(pair.id)}>×</button>
+                  </div>
+                )}
+              </For>
+            </div>
+
+            <div class="term-hits-heading">
+              <span>当前轨道「{activeTrack().name}」命中</span>
+              <span>{termHitRows().length} 条</span>
+            </div>
+            <div class="term-hit-list">
+              <For each={termHitRows()} fallback={<div class="mini-empty">当前轨道没有还能命中的片段。</div>}>
+                {(hit) => (
+                  <button
+                    class={`term-hit-row ${selectedHitKey() === hit.key ? "selected" : ""}`}
+                    onClick={() => setSelectedHitKey(hit.key)}
+                  >
+                    <div class="term-hit-meta">
+                      <b>片段 {hit.segmentIndex + 1}</b>
+                      <span>{formatTime(hit.segment.start, false)}</span>
+                      <span class="term-hit-pair">{hit.pair.wrong} → {hit.pair.standard}</span>
+                      <span class="term-hit-count">×{hit.count}</span>
+                    </div>
+                    <p>
+                      <For each={hitTextParts(hit.segment, hit.pair)}>
+                        {(part) => (part.hit ? <mark>{part.text}</mark> : part.text)}
+                      </For>
+                    </p>
+                  </button>
+                )}
+              </For>
+            </div>
+
+            <div class="dialog-footer">
+              <button class="btn btn-quiet" onClick={() => setTermDialogOpen(false)}>关闭</button>
+              <button class="btn btn-primary" disabled={!selectedHitKey()} onClick={applySelectedHit}>应用所选</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog>
 
       <Dialog open={helpOpen()} onOpenChange={setHelpOpen}>
         <Dialog.Portal>

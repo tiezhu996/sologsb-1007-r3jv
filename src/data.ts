@@ -70,6 +70,10 @@ export const createSeedProject = (): ProjectData => {
       { id: "sp-chen", name: "陈师傅", role: "旁述人", color: "#0f766e" },
     ],
     tags,
+    termPairs: [
+      { id: "term-ningshao", wrong: "宁邵帮", standard: "宁绍帮", createdAt: new Date().toISOString() },
+      { id: "term-yongju", wrong: "涌剧", standard: "甬剧", createdAt: new Date().toISOString() },
+    ],
     tracks: [
       {
         id: "track-zh",

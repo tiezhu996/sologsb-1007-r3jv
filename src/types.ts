@@ -55,6 +55,13 @@ export interface TranscriptTrack {
   segments: Segment[];
 }
 
+export interface TermPair {
+  id: string;
+  wrong: string;
+  standard: string;
+  createdAt: string;
+}
+
 export interface ProjectData {
   id: string;
   title: string;
@@ -64,6 +71,7 @@ export interface ProjectData {
   speakers: Speaker[];
   tags: Tag[];
   tracks: TranscriptTrack[];
+  termPairs: TermPair[];
   updatedAt: string;
 }
 
